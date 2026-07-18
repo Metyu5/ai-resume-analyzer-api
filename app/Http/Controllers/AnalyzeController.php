@@ -7,6 +7,7 @@ use GuzzleHttp\Exception\ClientException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Laravel\Sanctum\PersonalAccessToken;
 
 class AnalyzeController extends Controller
 {
@@ -19,6 +20,18 @@ class AnalyzeController extends Controller
      */
     public function analyze(Request $request): JsonResponse
     {
+        // Optional auth: resolve user from Bearer token if present
+        $user = $request->user();
+        if (! $user) {
+            $token = $request->bearerToken();
+            if ($token) {
+                $accessToken = PersonalAccessToken::findToken($token);
+                if ($accessToken) {
+                    $user = $accessToken->tokenable;
+                }
+            }
+        }
+
         $request->validate([
             'resume' => 'required|file|max:5120|mimes:pdf,docx',
             'jobDescription' => 'nullable|string|max:5000',
@@ -44,17 +57,34 @@ class AnalyzeController extends Controller
 
             $analysis = $this->aiService->analyzeResume($resumeText, $jobDescription);
 
+            $resultData = [
+                'score' => $analysis['score'],
+                'keywordsMatched' => $analysis['keywordsMatched'],
+                'keywordsTotal' => $analysis['keywordsTotal'],
+                'summary' => $analysis['summary'] ?? '',
+                'findings' => $analysis['findings'],
+                'missingKeywords' => $analysis['missingKeywords'] ?? [],
+                'suggestions' => $analysis['suggestions'] ?? [],
+            ];
+
+            // Save to history if user is authenticated
+            if ($user) {
+                $user->analyses()->create([
+                    'file_name' => $file->getClientOriginalName(),
+                    'job_description' => $jobDescription ?: null,
+                    'score' => $analysis['score'],
+                    'keywords_matched' => $analysis['keywordsMatched'],
+                    'keywords_total' => $analysis['keywordsTotal'],
+                    'summary' => $analysis['summary'] ?? null,
+                    'findings' => $analysis['findings'],
+                    'missing_keywords' => $analysis['missingKeywords'] ?? [],
+                    'suggestions' => $analysis['suggestions'] ?? [],
+                ]);
+            }
+
             return response()->json([
                 'success' => true,
-                'data' => [
-                    'score' => $analysis['score'],
-                    'keywordsMatched' => $analysis['keywordsMatched'],
-                    'keywordsTotal' => $analysis['keywordsTotal'],
-                    'summary' => $analysis['summary'] ?? '',
-                    'findings' => $analysis['findings'],
-                    'missingKeywords' => $analysis['missingKeywords'] ?? [],
-                    'suggestions' => $analysis['suggestions'] ?? [],
-                ],
+                'data' => $resultData,
             ]);
         } catch (\InvalidArgumentException $e) {
             return response()->json([
@@ -98,6 +128,7 @@ class AnalyzeController extends Controller
             ], 502);
         } catch (\RuntimeException $e) {
             Log::error('Resume analysis failed', ['error' => $e->getMessage()]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal menganalisis resume. Silakan coba lagi.',
@@ -109,6 +140,7 @@ class AnalyzeController extends Controller
                 'file' => $e->getFile(),
                 'line' => $e->getLine(),
             ]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Terjadi kesalahan tak terduga. Silakan coba lagi.',
